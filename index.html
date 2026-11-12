@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VIKMAN CLIPPER</title>
+<style>
+:root{color-scheme:dark;--bg:#090b10;--panel:#141923;--line:#273244;--accent:#8b5cf6;--muted:#aab4c4}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(145deg,#090b10,#111827);color:#f7f8fb;font:15px system-ui,Arial,sans-serif}
+main{max-width:760px;margin:auto;padding:22px 15px 50px}
+header{text-align:center;padding:18px 0 24px}h1{font-size:clamp(30px,8vw,48px);letter-spacing:2px;margin:0}h1 span{color:#a78bfa}
+header p{color:var(--muted);margin:8px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:16px;margin:14px 0}
+label{display:block;font-weight:650;margin:12px 0 7px}
+input[type=file],input[type=number],select,button{width:100%;border-radius:11px;border:1px solid var(--line);padding:12px;background:#0d121b;color:#fff;font:inherit}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+button{background:var(--accent);border:0;font-weight:750;cursor:pointer;margin-top:14px}
+button:disabled{opacity:.45;cursor:not-allowed}
+#preview{width:min(100%,330px);max-height:58vh;display:block;margin:12px auto;background:#000;border-radius:12px}
+small,.hint{color:var(--muted);line-height:1.5}
+#status{white-space:pre-wrap;color:#c4b5fd;margin-top:12px}
+progress{width:100%;height:12px;accent-color:var(--accent);margin-top:10px}
+a{color:#c4b5fd}
+@media(max-width:480px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<h1>VIKMAN <span>CLIPPER</span></h1>
+<p>Your personal mobile clipping studio</p>
+</header>
+
+<section class="card">
+<label for="videoFile">1. Choose a video from your phone</label>
+<input id="videoFile" type="file" accept="video/*">
+<video id="preview" controls playsinline></video>
+<p class="hint">Use videos you own or have permission to edit. Processing happens in this browser; the video is not uploaded to a server.</p>
+</section>
+
+<section class="card">
+<label>2. Choose the clip timing</label>
+<div class="grid">
+<div><label for="start">Start time (seconds)</label><input id="start" type="number" min="0" step="0.1" value="0"></div>
+<div><label for="duration">Clip length (seconds)</label><input id="duration" type="number" min="1" step="0.1" value="30"></div>
+</div>
+<label for="quality">3. Export quality</label>
+<select id="quality">
+<option value="720:1280">720 × 1280 (recommended for phones)</option>
+<option value="1080:1920">1080 × 1920 (slower; needs more memory)</option>
+</select>
+<p class="hint">The video is center-cropped to a vertical 9:16 frame. Keep clips short on phones with limited memory.</p>
+<button id="make" disabled>Create vertical clip</button>
+<progress id="progress" max="100" value="0" hidden></progress>
+<div id="status" role="status"></div>
+<a id="download" hidden>Download your MP4 clip</a>
+</section>
+</main>
+
+<script type="module">
+import { FFmpeg } from 'https://esm.sh/@ffmpeg/ffmpeg@0.12.10';
+import { toBlobURL } from 'https://esm.sh/@ffmpeg/util@0.12.1';
+
+const fileInput = document.querySelector('#videoFile');
+const preview = document.querySelector('#preview');
+const startInput = document.querySelector('#start');
+const durationInput = document.querySelector('#duration');
+const makeButton = document.querySelector('#make');
+const status = document.querySelector('#status');
+const progress = document.querySelector('#progress');
+const download = document.querySelector('#download');
+let selectedFile = null;
+let ffmpeg = null;
+let ready = false;
+let outputUrl = null;
+
+fileInput.addEventListener('change', () => {
+  selectedFile = fileInput.files?.[0] || null;
+  makeButton.disabled = !selectedFile;
+  download.hidden = true;
+  status.textContent = '';
+  if (outputUrl) URL.revokeObjectURL(outputUrl);
+  if (selectedFile) {
+    preview.src = URL.createObjectURL(selectedFile);
+    preview.onloadedmetadata = () => {
+      startInput.max = Math.max(0, preview.duration - 1);
+      durationInput.max = preview.duration;
+      durationInput.value = Math.min(30, preview.duration).toFixed(1);
+    };
+  }
+});
+
+async function loadFFmpeg() {
+  if (ready) return;
+  status.textContent = 'Loading video engine… Keep this page open.';
+  ffmpeg = new FFmpeg();
+  ffmpeg.on('progress', ({ progress: p }) => {
+    progress.value = Math.max(0, Math.min(100, Math.round(p * 100)));
+  });
+  const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+  await ffmpeg.load({
+    coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
+    wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm')
+  });
+  ready = true;
+}
+
+makeButton.addEventListener('click', async () => {
+  if (!selectedFile) return;
+  const start = Number(startInput.value);
+  const duration = Number(durationInput.value);
+  if (!Number.isFinite(start) || !Number.isFinite(duration) || start < 0 || duration <= 0) {
+    status.textContent = 'Enter a valid start time and clip length.';
+    return;
+  }
+  if (Number.isFinite(preview.duration) && start + duration > preview.duration + 0.05) {
+    status.textContent = 'The selected clip goes past the end of the video.';
+    return;
+  }
+
+  makeButton.disabled = true;
+  download.hidden = true;
+  progress.hidden = false;
+  progress.value = 0;
+  try {
+    await loadFFmpeg();
+    status.textContent = 'Preparing your clip…';
+    const ext = (selectedFile.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g,'') || 'mp4';
+    const inputName = `source.${ext}`;
+    const outputName = 'vikman_clip.mp4';
+    await ffmpeg.writeFile(inputName, new Uint8Array(await selectedFile.arrayBuffer()));
+    const [width, height] = document.querySelector('#quality').value.split(':');
+    const filter = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
+    await ffmpeg.exec([
+      '-ss', String(start), '-i', inputName, '-t', String(duration),
+      '-vf', filter, '-c:v', 'libx264', '-preset', 'ultrafast',
+      '-crf', '23', '-c:a', 'aac', '-b:a', '128k',
+      '-movflags', '+faststart', outputName
+    ]);
+    const data = await ffmpeg.readFile(outputName);
+    const blob = new Blob([data], { type: 'video/mp4' });
+    if (outputUrl) URL.revokeObjectURL(outputUrl);
+    outputUrl = URL.createObjectURL(blob);
+    download.href = outputUrl;
+    download.download = 'VIKMAN-CLIP.mp4';
+    download.hidden = false;
+    status.textContent = 'Done! Your vertical MP4 is ready.';
+  } catch (error) {
+    console.error(error);
+    status.textContent = 'Could not process this video. Try a shorter clip or 720 × 1280 quality. Some phones may run out of memory.';
+  } finally {
+    makeButton.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
